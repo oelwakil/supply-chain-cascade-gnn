@@ -16,7 +16,31 @@ N_SECTORS = 6
 N_REGIONS = 8
 
 
-def make_network(seed, obs_frac=0.7):
+def observation_probs(tiers, region, src, dst, obs_frac, mode, seed):
+    """Per-edge probability that a true link is observed.
+
+    mode='random'  : every link is observed with probability obs_frac (original behaviour).
+    mode='tier'    : links deeper in the chain (buyer in tier 2+) are less visible, as in real
+                     supply networks where tier-1 relationships are known and sub-tier ones are not.
+    mode='region'  : links whose supplier sits in a few 'opaque' regions are mostly hidden.
+    Non-random modes are rescaled so the average observed fraction is still obs_frac, which keeps
+    comparisons against the random mode fair.
+    """
+    if mode == 'random':
+        return np.full(len(src), obs_frac)
+    if mode == 'tier':
+        rel = np.array([1.5, 1.3, 1.0, 0.6, 0.4])[tiers[dst]]
+    elif mode == 'region':
+        r = np.random.default_rng(seed + 999)
+        opaque = r.choice(N_REGIONS, 3, replace=False)
+        rel = np.where(np.isin(region[src], opaque), 0.25, 1.4)
+    else:
+        raise ValueError(f'unknown hide mode: {mode}')
+    p = rel * obs_frac / rel.mean()
+    return np.clip(p, 0.02, 1.0)
+
+
+def make_network(seed, obs_frac=0.7, hide_mode='random'):
     rng = np.random.default_rng(seed)
     tiers = np.concatenate([np.full(n, t) for t, n in enumerate(TIER_SIZES)])
     N = len(tiers)
@@ -51,7 +75,7 @@ def make_network(seed, obs_frac=0.7):
             for j, wj in zip(sup, ww):
                 src.append(j); dst.append(i); w.append(wj)
     src, dst, w = map(np.array, (src, dst, w))
-    keep = rng.random(len(src)) < obs_frac
+    keep = rng.random(len(src)) < observation_probs(tiers, region, src, dst, obs_frac, hide_mode, seed)
     return dict(N=N, tiers=tiers, sector=sector, region=region, size=size, buffer=buffer,
                 src=src, dst=dst, w=w, obs_src=src[keep], obs_dst=dst[keep], obs_mask=keep)
 
@@ -105,10 +129,19 @@ def cascade(net, sev):
     return 1 - cap
 
 
-def node_features(net, sev):
-    """Features visible to a model: attributes + shock severity (no cascade info, no hidden edges)."""
+def node_features(net, sev, rich=False):
+    """Features visible to a model: attributes + shock severity (no cascade info, no hidden edges).
+
+    rich=True adds what a real analyst could plausibly observe: observed in/out degree and a noisy
+    reading of each firm's inventory cover (the true buffer plus measurement noise).
+    """
     N = net['N']
     f = [np.log(net['size'])[:, None],
          np.eye(5)[net['tiers']], np.eye(N_SECTORS)[net['sector']], np.eye(N_REGIONS)[net['region']],
          sev[:, None]]
+    if rich:
+        indeg = np.bincount(net['obs_dst'], minlength=N).astype(float)
+        outdeg = np.bincount(net['obs_src'], minlength=N).astype(float)
+        noise = np.random.default_rng(int(net['size'].sum() * 1e6) % (2 ** 31)).normal(0, 0.1, N)
+        f += [np.log1p(indeg)[:, None], np.log1p(outdeg)[:, None], (net['buffer'] + noise)[:, None]]
     return np.concatenate(f, 1).astype(np.float32)

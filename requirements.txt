@@ -3,3 +3,5 @@ scipy>=1.11
 scikit-learn>=1.4
 torch>=2.2
 torch-geometric>=2.5
+matplotlib>=3.8
+pytest>=8
